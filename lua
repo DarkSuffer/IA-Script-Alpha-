@@ -7,6 +7,7 @@ local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local TeleportService = game:GetService("TeleportService")
 local HttpService = game:GetService("HttpService")
+local Lighting = game:GetService("Lighting")
 local LocalPlayer = Players.LocalPlayer
 local Camera = workspace.CurrentCamera
 
@@ -21,8 +22,11 @@ local gunESPEnabled = false
 
 local autoWalkCollectEnabled = false
 local instantCollectEnabled = false
-local instantCollectRange = 200  -- default max
+local instantCollectRange = 200
 local autoWalkRange = 8
+
+local fullbrightEnabled = false
+local noFogEnabled = false
 
 local flyEnabled = false
 local flySpeed = 50
@@ -32,6 +36,11 @@ local killAuraEnabled = false
 local killAuraRange = 20
 local autoRejoinEnabled = false
 local autoServerHopOnKick = false
+
+-- Saved lighting state for restore on toggle off
+local savedLighting = {}
+local savedAtmosphere = {}
+local atmosphereRef = nil
 
 local clueESPObjects = {}
 local separationESPObjects = {}
@@ -68,6 +77,8 @@ local function SaveConfig(name)
         instantCollectEnabled = instantCollectEnabled,
         instantCollectRange = instantCollectRange,
         autoWalkRange = autoWalkRange,
+        fullbrightEnabled = fullbrightEnabled,
+        noFogEnabled = noFogEnabled,
         flyEnabled = flyEnabled,
         flySpeed = flySpeed,
         walkSpeedEnabled = walkSpeedEnabled,
@@ -93,6 +104,84 @@ end
 local function DeleteConfig(name)
     local path = CONFIG_FOLDER .. "/" .. name .. ".json"
     if isfile(path) then delfile(path) end
+end
+
+-- ============ FULLBRIGHT ============
+local function EnableFullbright()
+    -- Save current lighting values
+    savedLighting = {
+        Brightness = Lighting.Brightness,
+        ClockTime = Lighting.ClockTime,
+        FogEnd = Lighting.FogEnd,
+        FogStart = Lighting.FogStart,
+        GlobalShadows = Lighting.GlobalShadows,
+        Ambient = Lighting.Ambient,
+        OutdoorAmbient = Lighting.OutdoorAmbient,
+    }
+    -- Apply fullbright
+    Lighting.Brightness = 2
+    Lighting.ClockTime = 14          -- midday
+    Lighting.FogEnd = 100000
+    Lighting.FogStart = 100000
+    Lighting.GlobalShadows = false
+    Lighting.Ambient = Color3.fromRGB(255, 255, 255)
+    Lighting.OutdoorAmbient = Color3.fromRGB(255, 255, 255)
+end
+
+local function DisableFullbright()
+    -- Restore saved values
+    if next(savedLighting) then
+        Lighting.Brightness    = savedLighting.Brightness
+        Lighting.ClockTime     = savedLighting.ClockTime
+        Lighting.FogEnd        = savedLighting.FogEnd
+        Lighting.FogStart      = savedLighting.FogStart
+        Lighting.GlobalShadows = savedLighting.GlobalShadows
+        Lighting.Ambient       = savedLighting.Ambient
+        Lighting.OutdoorAmbient = savedLighting.OutdoorAmbient
+        savedLighting = {}
+    end
+end
+
+-- ============ NO FOG ============
+local function EnableNoFog()
+    -- Kill Lighting fog values
+    Lighting.FogEnd = 100000
+    Lighting.FogStart = 100000
+
+    -- Find and store Atmosphere reference, then neutralize it
+    atmosphereRef = Lighting:FindFirstChildOfClass("Atmosphere")
+    if atmosphereRef then
+        savedAtmosphere = {
+            Density = atmosphereRef.Density,
+            Offset = atmosphereRef.Offset,
+            Haze = atmosphereRef.Haze,
+            Glare = atmosphereRef.Glare,
+        }
+        atmosphereRef.Density = 0
+        atmosphereRef.Offset = 0
+        atmosphereRef.Haze = 0
+        atmosphereRef.Glare = 0
+    end
+end
+
+local function DisableNoFog()
+    -- Restore Lighting fog
+    if not fullbrightEnabled then
+        -- Only restore if fullbright isn't already overriding these
+        if next(savedLighting) then
+            Lighting.FogEnd   = savedLighting.FogEnd
+            Lighting.FogStart = savedLighting.FogStart
+        end
+    end
+    -- Restore Atmosphere
+    if atmosphereRef and atmosphereRef.Parent and next(savedAtmosphere) then
+        atmosphereRef.Density = savedAtmosphere.Density
+        atmosphereRef.Offset  = savedAtmosphere.Offset
+        atmosphereRef.Haze    = savedAtmosphere.Haze
+        atmosphereRef.Glare   = savedAtmosphere.Glare
+        savedAtmosphere = {}
+    end
+    atmosphereRef = nil
 end
 
 -- ============ ROLE DETECTION ============
@@ -660,6 +749,8 @@ local function LoadConfig(name)
     instantCollectEnabled = data.instantCollectEnabled or false
     instantCollectRange   = data.instantCollectRange   or 200
     autoWalkRange         = data.autoWalkRange         or 8
+    fullbrightEnabled     = data.fullbrightEnabled     or false
+    noFogEnabled          = data.noFogEnabled          or false
     flyEnabled            = data.flyEnabled            or false
     flySpeed              = data.flySpeed              or 50
     walkSpeedEnabled      = data.walkSpeedEnabled      or false
@@ -669,6 +760,8 @@ local function LoadConfig(name)
     autoRejoinEnabled     = data.autoRejoinEnabled     or false
     autoServerHopOnKick   = data.autoServerHopOnKick   or false
 
+    if fullbrightEnabled then EnableFullbright() end
+    if noFogEnabled then EnableNoFog() end
     if flyEnabled then task.spawn(HandleFly) end
     if SyncUI then SyncUI() end
     return true
@@ -818,7 +911,46 @@ local instantCollectRangeSlider = MurderTab:CreateSlider({
     Callback = function(v) instantCollectRange = v end
 })
 
--- ============ TAB 2: MOVEMENT ============
+-- ============ TAB 2: VISUALS ============
+local VisualsTab = Window:CreateTab("Visuals", 4483362458)
+
+VisualsTab:CreateSection("Lighting")
+VisualsTab:CreateLabel("💡 For dark maps or when electricity is cut.")
+
+local fullbrightToggle = VisualsTab:CreateToggle({
+    Name = "☀️ Fullbright",
+    CurrentValue = false,
+    Callback = function(v)
+        fullbrightEnabled = v
+        if v then
+            EnableFullbright()
+        else
+            DisableFullbright()
+            -- Re-apply no fog if still enabled after fullbright restore
+            if noFogEnabled then EnableNoFog() end
+        end
+        Rayfield:Notify({Title = "Fullbright", Content = v and "ON" or "OFF", Duration = 2})
+    end
+})
+
+VisualsTab:CreateSection("Fog")
+VisualsTab:CreateLabel("🌫️ For foggy maps. Removes Atmosphere + Lighting fog.")
+
+local noFogToggle = VisualsTab:CreateToggle({
+    Name = "🌫️ No Fog",
+    CurrentValue = false,
+    Callback = function(v)
+        noFogEnabled = v
+        if v then
+            EnableNoFog()
+        else
+            DisableNoFog()
+        end
+        Rayfield:Notify({Title = "No Fog", Content = v and "ON" or "OFF", Duration = 2})
+    end
+})
+
+-- ============ TAB 3: MOVEMENT ============
 local MovementTab = Window:CreateTab("Movement", 4483362458)
 MovementTab:CreateSection("Fly")
 
@@ -847,7 +979,7 @@ local walkSpeedSlider = MovementTab:CreateSlider({
     Callback = function(v) customWalkSpeed = v end
 })
 
--- ============ TAB 3: COMBAT ============
+-- ============ TAB 4: COMBAT ============
 local CombatTab = Window:CreateTab("Combat", 4483362458)
 CombatTab:CreateSection("Kill Aura")
 
@@ -861,7 +993,7 @@ local killAuraRangeSlider = CombatTab:CreateSlider({
 })
 CombatTab:CreateLabel("⚠️ May be detectable")
 
--- ============ TAB 4: SERVER ============
+-- ============ TAB 5: SERVER ============
 local ServerTab = Window:CreateTab("Server", 4483362458)
 ServerTab:CreateSection("Management")
 
@@ -887,7 +1019,7 @@ local autoHopToggle = ServerTab:CreateToggle({
     end
 })
 
--- ============ TAB 5: CONFIG ============
+-- ============ TAB 6: CONFIG ============
 local ConfigTab = Window:CreateTab("Config", 4483362458)
 
 ConfigTab:CreateSection("Save")
@@ -969,6 +1101,8 @@ SyncUI = function()
     autoWalkRangeSlider:Set(autoWalkRange)
     instantCollectToggle:Set(instantCollectEnabled)
     instantCollectRangeSlider:Set(instantCollectRange)
+    fullbrightToggle:Set(fullbrightEnabled)
+    noFogToggle:Set(noFogEnabled)
     flyToggle:Set(flyEnabled)
     flySpeedSlider:Set(flySpeed)
     walkSpeedToggle:Set(walkSpeedEnabled)
@@ -1003,6 +1137,35 @@ workspace.DescendantAdded:Connect(function(desc)
     end
 end)
 
+-- Fullbright re-apply loop
+-- The game may reset Lighting values during events (e.g. electricity cut)
+-- so we re-enforce fullbright every second when enabled
+task.spawn(function()
+    while true do
+        task.wait(1)
+        if fullbrightEnabled then
+            Lighting.Brightness = 2
+            Lighting.ClockTime = 14
+            Lighting.FogEnd = 100000
+            Lighting.FogStart = 100000
+            Lighting.GlobalShadows = false
+            Lighting.Ambient = Color3.fromRGB(255, 255, 255)
+            Lighting.OutdoorAmbient = Color3.fromRGB(255, 255, 255)
+        end
+        if noFogEnabled then
+            Lighting.FogEnd = 100000
+            Lighting.FogStart = 100000
+            local atm = Lighting:FindFirstChildOfClass("Atmosphere")
+            if atm then
+                atm.Density = 0
+                atm.Offset = 0
+                atm.Haze = 0
+                atm.Glare = 0
+            end
+        end
+    end
+end)
+
 -- Auto Walk & Collect loop
 task.spawn(function()
     while true do
@@ -1013,14 +1176,12 @@ task.spawn(function()
 
             if root and hum then
                 local clues = GetAllActiveClues()
-
                 for _, clueData in ipairs(clues) do
                     if not autoWalkCollectEnabled then break end
                     if not clueData.part or not clueData.part.Parent then continue end
                     if not clueData.prompt or not clueData.prompt.Parent then continue end
 
                     local dist = (clueData.part.Position - root.Position).Magnitude
-
                     if dist <= autoWalkRange then
                         pcall(function() fireproximityprompt(clueData.prompt) end)
                         task.wait(0.3)
@@ -1040,7 +1201,6 @@ task.spawn(function()
                     end
                 end
             end
-
             task.wait(0.5)
         else
             task.wait(0.5)
