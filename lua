@@ -865,35 +865,97 @@ end
 
 -- ============ AUTO TELEPORT COLLECT ============
 local function RunAutoTeleportCollect()
-    if autoTeleportClueActive then Library:Notify("Already running.", 2) return end
-    if not instantCollectEnabled then Library:Notify("Enable Instant Collect first.", 3) return end
+    -- Guard: already running
+    if autoTeleportClueActive then return end
+    if not instantCollectEnabled then
+        Library:Notify("Enable Instant Collect first.", 3)
+        pcall(function() Toggles.AutoTeleportCollect:SetValue(false) end)
+        return
+    end
+
     local char = LocalPlayer.Character
     local root = char and char:FindFirstChild("HumanoidRootPart")
-    if not root then Library:Notify("No character.", 2) return end
+    if not root then
+        Library:Notify("No character.", 2)
+        pcall(function() Toggles.AutoTeleportCollect:SetValue(false) end)
+        return
+    end
+
     autoTeleportClueActive = true
-    local homeCFrame = root.CFrame
-    local clues = GetAllActiveClues()
-    if #clues == 0 then
-        Library:Notify("No active clues found.", 2); autoTeleportClueActive = false return end
-    Library:Notify("Auto collect: "..#clues.." clues.", 3)
+
     task.spawn(function()
-        for _, cd in ipairs(clues) do
-            if not scriptAlive or not autoTeleportClueActive then break end
-            local clue = cd.part; local prompt = cd.prompt
-            if not clue or not clue.Parent or not IsActiveClue(clue) then continue end
-            if not prompt or not prompt.Parent then continue end
-            root.CFrame = CFrame.new(clue.Position + Vector3.new(0,4,0))
-            local deadline = tick() + 4
-            while tick() < deadline do
-                if not scriptAlive or not autoTeleportClueActive then break end
-                if not clue.Parent or not IsActiveClue(clue) then break end
-                task.wait(0.05)
+        local homeCFrame = root.CFrame
+
+        -- Continuous loop: runs until toggle is turned off or script unloads
+        while scriptAlive and autoTeleportClueActive do
+            -- Re-validate character each cycle (handles respawn)
+            char = LocalPlayer.Character
+            root = char and char:FindFirstChild("HumanoidRootPart")
+            if not root then
+                task.wait(1)
+                continue
             end
-            task.wait(0.15)
+
+            -- Stop if instant collect was disabled mid-run
+            if not instantCollectEnabled then
+                autoTeleportClueActive = false
+                pcall(function() Toggles.AutoTeleportCollect:SetValue(false) end)
+                Library:Notify("Instant Collect disabled. Stopping.", 3)
+                break
+            end
+
+            local clues = GetAllActiveClues()
+
+            if #clues == 0 then
+                -- No clues yet; wait and retry
+                task.wait(1)
+                continue
+            end
+
+            Library:Notify("Auto collect: " .. #clues .. " clues.", 3)
+            homeCFrame = root.CFrame
+
+            for _, cd in ipairs(clues) do
+                if not scriptAlive or not autoTeleportClueActive then break end
+
+                local clue   = cd.part
+                local prompt = cd.prompt
+
+                if not clue or not clue.Parent or not IsActiveClue(clue) then continue end
+                if not prompt or not prompt.Parent then continue end
+
+                -- Re-grab root in case of respawn mid-sweep
+                char = LocalPlayer.Character
+                root = char and char:FindFirstChild("HumanoidRootPart")
+                if not root then break end
+
+                root.CFrame = CFrame.new(clue.Position + Vector3.new(0, 4, 0))
+
+                local deadline = tick() + 4
+                while tick() < deadline do
+                    if not scriptAlive or not autoTeleportClueActive then break end
+                    if not clue.Parent or not IsActiveClue(clue) then break end
+                    task.wait(0.05)
+                end
+
+                task.wait(0.15)
+            end
+
+            -- Return home after each full sweep
+            char = LocalPlayer.Character
+            root = char and char:FindFirstChild("HumanoidRootPart")
+            if root and root.Parent then
+                root.CFrame = homeCFrame
+            end
+
+            -- Brief pause before next sweep
+            task.wait(0.5)
         end
-        if root and root.Parent then root.CFrame = homeCFrame end
+
+        -- Exit cleanup: sync toggle off if loop exited internally
         autoTeleportClueActive = false
-        Library:Notify("Auto collect done. Returned.", 3)
+        pcall(function() Toggles.AutoTeleportCollect:SetValue(false) end)
+        Library:Notify("Auto collect stopped.", 3)
     end)
 end
 
@@ -1014,10 +1076,20 @@ CollectBox:AddToggle("InstantCollect", { Text = "Instant Collect (nearby)", Defa
 CollectBox:AddSlider("InstantCollectRange", { Text = "Collect range", Default = 3, Min = 3, Max = 80, Rounding = 0,
     Callback = function(v) instantCollectRange = v end })
 CollectBox:AddLabel("Requires Instant Collect.")
-CollectBox:AddButton("Auto Teleport & Collect All", function() RunAutoTeleportCollect() end)
-CollectBox:AddButton("Stop Auto Collect", function()
-    if autoTeleportClueActive then autoTeleportClueActive = false; Library:Notify("Stopped.", 2)
-    else Library:Notify("Not running.", 2) end end)
+CollectBox:AddToggle("AutoTeleportCollect", {
+    Text    = "Auto Teleport & Collect All",
+    Default = false,
+    Callback = function(v)
+        if v then
+            RunAutoTeleportCollect()
+        else
+            if autoTeleportClueActive then
+                autoTeleportClueActive = false
+                Library:Notify("Auto collect stopped.", 2)
+            end
+        end
+    end
+})
 
 VisualBox:AddToggle("FullbrightEnabled", { Text = "Fullbright", Default = false,
     Callback = function(v) fullbrightEnabled = v
