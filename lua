@@ -98,22 +98,134 @@ local sessionStart   = tick()
 local SHERIFF_GUNS = { ["mad sheriff"] = true, ["mad handgun"] = true }
 local function isMurdererTool(n) return n:lower():sub(1, 3) == "mu_" end
 local function isSheriffTool(n)  return SHERIFF_GUNS[n:lower()] == true end
-local function isJesterTool(n)   return n:lower():sub(1, 3) == "je_" end
+local function isJesterToolName(n) return n:lower():sub(1, 3) == "je_" end
+
+-- Cache: tool -> boolean (is jester weapon). Weak keys: auto-GC when tool destroyed.
+local jesterToolCache = setmetatable({}, { __mode = "k" })
+
+local DMG_MULT_KEYS = {
+    "DamageMultiplier", "DmgMult", "Multiplier", "dmgMult",
+    "damageMultiplier", "DamageMult", "Damage_Multiplier",
+}
+
+local function readNumberFromValueObject(obj)
+    if not obj then return nil end
+    if obj:IsA("NumberValue") or obj:IsA("IntValue") then
+        return obj.Value
+    end
+    return nil
+end
+
+local function scanConfigContainerForNegMult(container)
+    if not container then return false end
+    for _, key in ipairs(DMG_MULT_KEYS) do
+        local child = container:FindFirstChild(key)
+        local n = readNumberFromValueObject(child)
+        if n and n < 0 then return true end
+    end
+    for _, key in ipairs(DMG_MULT_KEYS) do
+        local ok, val = pcall(container.GetAttribute, container, key)
+        if ok and type(val) == "number" and val < 0 then return true end
+    end
+    return false
+end
+
+local function IsJesterWeapon(tool)
+    if not tool or not tool:IsA("Tool") then return false end
+
+    local cached = jesterToolCache[tool]
+    if cached ~= nil then return cached end
+
+    local result = false
+
+    if isJesterToolName(tool.Name) then
+        result = true
+    else
+        for _, key in ipairs(DMG_MULT_KEYS) do
+            local ok, val = pcall(tool.GetAttribute, tool, key)
+            if ok and type(val) == "number" and val < 0 then
+                result = true
+                break
+            end
+        end
+
+        if not result then
+            for _, desc in ipairs(tool:GetDescendants()) do
+                if desc.Name == "Config" then
+                    if desc:IsA("Folder") or desc:IsA("Configuration") or desc:IsA("Model") then
+                        if scanConfigContainerForNegMult(desc) then
+                            result = true
+                            break
+                        end
+                    elseif desc:IsA("ModuleScript") then
+                        local ok, mod = pcall(require, desc)
+                        if ok and type(mod) == "table" then
+                            for _, key in ipairs(DMG_MULT_KEYS) do
+                                local v = mod[key]
+                                if type(v) == "number" and v < 0 then
+                                    result = true
+                                    break
+                                end
+                            end
+                            if result then break end
+                        end
+                    end
+                end
+            end
+        end
+
+        if not result then
+            for _, desc in ipairs(tool:GetDescendants()) do
+                if desc:IsA("NumberValue") or desc:IsA("IntValue") then
+                    for _, key in ipairs(DMG_MULT_KEYS) do
+                        if desc.Name == key and desc.Value < 0 then
+                            result = true
+                            break
+                        end
+                    end
+                    if result then break end
+                end
+            end
+        end
+    end
+
+    jesterToolCache[tool] = result
+
+    pcall(function()
+        tool.Destroying:Connect(function()
+            jesterToolCache[tool] = nil
+        end)
+    end)
+
+    return result
+end
 
 local function ScanToolsForRole(player)
     local containers = {}
     if player.Character then table.insert(containers, player.Character) end
     local bp = player:FindFirstChild("Backpack")
     if bp then table.insert(containers, bp) end
+
+    -- Pass 1: Jester check has priority (jester can hold ANY weapon, including mu_*)
+    -- Negative damage multiplier is the ground truth.
+    for _, container in ipairs(containers) do
+        for _, obj in ipairs(container:GetDescendants()) do
+            if obj:IsA("Tool") and IsJesterWeapon(obj) then
+                return "Jester"
+            end
+        end
+    end
+
+    -- Pass 2: standard role detection by tool name
     for _, container in ipairs(containers) do
         for _, obj in ipairs(container:GetDescendants()) do
             if obj:IsA("Tool") then
                 if isMurdererTool(obj.Name) then return "Murderer" end
                 if isSheriffTool(obj.Name)  then return "Sheriff"  end
-                if isJesterTool(obj.Name)   then return "Jester"   end
             end
         end
     end
+
     return "Innocent"
 end
 
@@ -865,7 +977,6 @@ end
 
 -- ============ AUTO TELEPORT COLLECT ============
 local function RunAutoTeleportCollect()
-    -- Guard: already running
     if autoTeleportClueActive then return end
     if not instantCollectEnabled then
         Library:Notify("Enable Instant Collect first.", 3)
@@ -886,9 +997,7 @@ local function RunAutoTeleportCollect()
     task.spawn(function()
         local homeCFrame = root.CFrame
 
-        -- Continuous loop: runs until toggle is turned off or script unloads
         while scriptAlive and autoTeleportClueActive do
-            -- Re-validate character each cycle (handles respawn)
             char = LocalPlayer.Character
             root = char and char:FindFirstChild("HumanoidRootPart")
             if not root then
@@ -896,7 +1005,6 @@ local function RunAutoTeleportCollect()
                 continue
             end
 
-            -- Stop if instant collect was disabled mid-run
             if not instantCollectEnabled then
                 autoTeleportClueActive = false
                 pcall(function() Toggles.AutoTeleportCollect:SetValue(false) end)
@@ -907,7 +1015,6 @@ local function RunAutoTeleportCollect()
             local clues = GetAllActiveClues()
 
             if #clues == 0 then
-                -- No clues yet; wait and retry
                 task.wait(1)
                 continue
             end
@@ -924,7 +1031,6 @@ local function RunAutoTeleportCollect()
                 if not clue or not clue.Parent or not IsActiveClue(clue) then continue end
                 if not prompt or not prompt.Parent then continue end
 
-                -- Re-grab root in case of respawn mid-sweep
                 char = LocalPlayer.Character
                 root = char and char:FindFirstChild("HumanoidRootPart")
                 if not root then break end
@@ -941,18 +1047,15 @@ local function RunAutoTeleportCollect()
                 task.wait(0.15)
             end
 
-            -- Return home after each full sweep
             char = LocalPlayer.Character
             root = char and char:FindFirstChild("HumanoidRootPart")
             if root and root.Parent then
                 root.CFrame = homeCFrame
             end
 
-            -- Brief pause before next sweep
             task.wait(0.5)
         end
 
-        -- Exit cleanup: sync toggle off if loop exited internally
         autoTeleportClueActive = false
         pcall(function() Toggles.AutoTeleportCollect:SetValue(false) end)
         Library:Notify("Auto collect stopped.", 3)
